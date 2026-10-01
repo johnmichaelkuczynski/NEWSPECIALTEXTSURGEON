@@ -1,4 +1,4 @@
-import { callFreshTreeLLM, freshTreeProviderUnavailable, markFreshTreeProviderUnavailable } from "./freshTreeProvider";
+import { callFreshTreeLLM, callFreshTreeResearch, freshTreeProviderUnavailable, markFreshTreeProviderUnavailable } from "./freshTreeProvider";
 import type { TractatusStatement } from "./tractatusTree";
 
 export type FreshTreeStatement = TractatusStatement;
@@ -81,7 +81,7 @@ export async function generateFreshTree(source: string, signal: AbortSignal): Pr
   let previous = "";
   for (let attempt = 0; attempt < 2; attempt++) {
     const correction = attempt ? `\nThe previous response was not a valid two-tier tree. Correct the format: each thesis must be numbered 1.0, 2.0, etc., followed by at least one child numbered 1.1, 2.1, etc. No deeper lines. Recheck every line against the source.\n<previous-response>\n${previous}\n</previous-response>` : "";
-    const raw = await callFreshTreeLLM(`Build a plain numbered tree. ${required}\nEvery thesis must have at least one direct sub-claim. Output numbered lines only, with one sentence per line. Do not use Markdown.${correction}\n\n<source>\n${source}\n</source>`, signal);
+    const raw = await callFreshTreeLLM(`Build a plain numbered tree. ${required}\nEvery thesis must have at least one direct sub-claim. Output numbered lines only, with one sentence per line. Do not use Markdown.${correction}\n\n<source>\n${source}\n</source>`, signal, attempt ? "Correcting the first two tiers" : "Building the first two tiers");
     assertNotAborted(signal);
     const statements = parseTreeLines(raw, 2);
     const roots = statements.filter((item) => item.number.endsWith(".0"));
@@ -93,33 +93,20 @@ export async function generateFreshTree(source: string, signal: AbortSignal): Pr
   throw new Error("The model did not return a valid two-tier tree after a correction attempt.");
 }
 
-function responseText(data: any): string {
-  if (typeof data?.output_text === "string") return data.output_text;
-  return (data?.output || []).flatMap((item: any) => item?.content || [])
-    .filter((item: any) => item?.type === "output_text" && typeof item.text === "string")
-    .map((item: any) => item.text).join("\n");
-}
-
 async function research(prompt: string, signal: AbortSignal, shouldStop?: () => boolean): Promise<{ text: string; searched: boolean }> {
   const key = process.env.OPENAI_API_KEY;
   if (!key || freshTreeProviderUnavailable(signal, "openai")) {
-    return { text: await callFreshTreeLLM(prompt, signal), searched: false };
+    return { text: await callFreshTreeLLM(prompt, signal, "Generating support without verified web search"), searched: false };
   }
   try {
-    const response = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST", signal,
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-      body: JSON.stringify({ model: "gpt-4o", tools: [{ type: "web_search_preview" }], input: prompt }),
-    });
-    if (!response.ok) throw new Error(`OpenAI web search returned ${response.status}`);
-    const text = responseText(await response.json());
+    const text = await callFreshTreeResearch(prompt, signal);
     if (!text.trim()) throw new Error("web search returned no text");
     return { text, searched: true };
   } catch (error) {
     if (signal.aborted) throw error;
     if (shouldStop?.()) return { text: "", searched: false };
     markFreshTreeProviderUnavailable(signal, "openai", error);
-    return { text: await callFreshTreeLLM(prompt, signal), searched: false };
+    return { text: await callFreshTreeLLM(prompt, signal, "Generating support without verified web search"), searched: false };
   }
 }
 
@@ -238,7 +225,7 @@ ${researchResult}
 
 SOURCE TEXT (freshness exclusion list):
 ${source}`;
-  const reviewedRaw = await callFreshTreeLLM(prompt, signal);
+  const reviewedRaw = await callFreshTreeLLM(prompt, signal, "Reviewing support and removing duplicates");
   const start = reviewedRaw.indexOf("{");
   const end = reviewedRaw.lastIndexOf("}");
   if (start < 0 || end < start) throw new Error("Fresh-tier review returned invalid structured output.");
@@ -372,7 +359,7 @@ PARENT ${candidate.parent}: ${existing.find((line) => line.number === candidate.
 REJECTED NODE ${candidate.number}: ${candidate.text}
 WEB RESEARCH RESULT: ${researchResult}
 SOURCE TEXT (freshness exclusion list): ${source}`;
-    const replacement = await callFreshTreeLLM(prompt, signal);
+    const replacement = await callFreshTreeLLM(prompt, signal, "Regenerating a rejected support node");
     assertNotAborted(signal);
     if (shouldStop?.()) return [];
     const text = replacement.trim().replace(/^\s*\d+(?:\.\d+)+\s+/, "").split("\n")[0].trim();

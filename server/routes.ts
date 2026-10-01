@@ -1442,12 +1442,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
     res.flushHeaders();
     const send = (event: unknown) => { if (!controller.signal.aborted && !res.writableEnded) res.write(`data: ${JSON.stringify(event)}\n\n`); };
+    const heartbeat = setInterval(() => send({ type: "heartbeat" }), 8000);
     try {
       const { generateFreshTree, addNextTier } = await import("./services/freshTree");
       const { reportFreshTreeProviders } = await import("./services/freshTreeProvider");
-      reportFreshTreeProviders(controller.signal, (message) => send({ type: "provider-status", message }));
+      reportFreshTreeProviders(controller.signal, (message) => send({ type: "provider-status", message }), {
+        start: (provider, stage) => send({ type: "model-start", provider, stage }),
+        chunk: (text) => send({ type: "model-delta", text }),
+        complete: () => send({ type: "model-complete" }),
+      });
       if (action === "next") {
         for (const unit of units) {
           const tree = treeByIndex.get(unit.index);
@@ -1560,6 +1566,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error: any) {
       send({ type: "error", error: error?.message || "Fresh Tree failed" });
     } finally {
+      clearInterval(heartbeat);
       if (freshTreeRuns.get(runId) === runState) freshTreeRuns.delete(runId);
       if (!res.writableEnded) res.end();
     }

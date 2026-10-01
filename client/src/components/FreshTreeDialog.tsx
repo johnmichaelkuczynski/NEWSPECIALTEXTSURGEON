@@ -34,6 +34,12 @@ export function FreshTreeDialog({ open, onOpenChange, text, selection, onSendToP
   const [errors, setErrors] = useState<string[]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [providerStatuses, setProviderStatuses] = useState<string[]>([]);
+  const [liveText, setLiveText] = useState("");
+  const [liveProvider, setLiveProvider] = useState("");
+  const [liveStage, setLiveStage] = useState("");
+  const [receivedCharacters, setReceivedCharacters] = useState(0);
+  const [lastModelTextAt, setLastModelTextAt] = useState<number | null>(null);
+  const [modelResponseComplete, setModelResponseComplete] = useState(false);
   const [progress, setProgress] = useState("");
   const [instructions, setInstructions] = useState(DEFAULT_INSTRUCTIONS);
   const [depthInput, setDepthInput] = useState("");
@@ -52,6 +58,7 @@ export function FreshTreeDialog({ open, onOpenChange, text, selection, onSendToP
   const wasOpen = useRef(false);
   const treesRef = useRef<Tree[]>([]);
   const outputRef = useRef<HTMLPreElement | null>(null);
+  const liveTextRef = useRef<HTMLPreElement | null>(null);
 
   useEffect(() => { treesRef.current = trees; }, [trees]);
   useEffect(() => {
@@ -165,6 +172,7 @@ export function FreshTreeDialog({ open, onOpenChange, text, selection, onSendToP
     const controller = new AbortController();
     const id = crypto.randomUUID();
     request.current = controller; runId.current = id; setRunning(true); setElapsed(0); setStopping(false); setErrors([]); setProgress(""); setProviderStatuses([]);
+    setLiveText(""); setLiveProvider(""); setLiveStage(""); setReceivedCharacters(0); setLastModelTextAt(null); setModelResponseComplete(false);
     if (action === "generate") { setTrees([]); setWarnings([]); setGeneratedFor(inputKey); }
     if (action !== "resume") {
       setSnapshot({ inputKey, action, target, instructions, addedInstructions, expectedUnits });
@@ -202,6 +210,13 @@ export function FreshTreeDialog({ open, onOpenChange, text, selection, onSendToP
           const data = JSON.parse(line.slice(6));
           if (data.type === "progress") setProgress(data.message);
            else if (data.type === "provider-status") setProviderStatuses((old) => [...old, data.message]);
+           else if (data.type === "model-start") {
+             setLiveProvider(data.provider); setLiveStage(data.stage); setLiveText(""); setModelResponseComplete(false);
+           } else if (data.type === "model-delta" && typeof data.text === "string") {
+             setLiveText((old) => (old + data.text).slice(-24000));
+             setReceivedCharacters((old) => old + data.text.length);
+             setLastModelTextAt(Date.now());
+           } else if (data.type === "model-complete") setModelResponseComplete(true);
           else if (data.type === "chapter-error") setErrors((old) => [...old, `${data.title}: ${data.error}`]);
           else if (data.type === "node-warning") setWarnings((old) => [...old, data.message]);
            else if (data.type === "stopped") setProgress("Stopped. All output and progress have been kept. Use RESUME to continue without repeating finished work.");
@@ -251,6 +266,13 @@ export function FreshTreeDialog({ open, onOpenChange, text, selection, onSendToP
   useEffect(() => {
     if (outputRef.current) outputRef.current.scrollTop = outputRef.current.scrollHeight;
   }, [output]);
+  useEffect(() => {
+    if (liveTextRef.current) liveTextRef.current.scrollTop = liveTextRef.current.scrollHeight;
+  }, [liveText]);
+  const hasReceivedModelText = receivedCharacters > 0;
+  useEffect(() => {
+    if (hasReceivedModelText) liveTextRef.current?.scrollIntoView({ block: "nearest" });
+  }, [hasReceivedModelText]);
   const download = () => {
     const url = URL.createObjectURL(new Blob([output], { type: "text/plain" }));
     const link = document.createElement("a");
@@ -303,11 +325,25 @@ export function FreshTreeDialog({ open, onOpenChange, text, selection, onSendToP
         <span className="inline-block size-2 rounded-full bg-blue-600 animate-pulse mr-2" aria-hidden="true" />
         {stopping ? "Stopping…" : "Fresh Tree is running"} · {Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, "0")} elapsed
         {progress && <span className="block mt-1">{progress}</span>}
-        <span className="block mt-1">{trees.filter((tree) => tree.complete).length} of {expectedUnits} chapters finished · {trees.reduce((sum, tree) => sum + tree.statements.length, 0)} nodes received</span>
+        <span className="block mt-1" data-testid="fresh-tree-stream-count">{receivedCharacters.toLocaleString()} model-text characters received · {trees.reduce((sum, tree) => sum + tree.statements.length, 0)} validated nodes retained · {trees.filter((tree) => tree.complete).length} of {expectedUnits} chapters finished</span>
+        <span className="block mt-1 text-xs">
+          {lastModelTextAt === null ? "Connected to the server; waiting for the provider's first text. Nodes are retained after validation."
+            : `Last model text received ${Math.max(0, Math.floor((Date.now() - lastModelTextAt) / 1000))} seconds ago. Draft text is shown below while nodes are checked.`}
+        </span>
         <div className="flex gap-2 mt-2">
           {output && <Button type="button" size="sm" variant="outline" onClick={download}>Save output so far</Button>}
           <Button type="button" size="sm" variant="destructive" disabled={stopping} onClick={() => void stop()}>{stopping ? "STOPPING…" : "STOP"}</Button>
         </div>
+      </div>}
+      {(running || liveText) && <div className="rounded border border-blue-200 bg-blue-50 p-3" data-testid="fresh-tree-live-stream">
+        <p className="text-sm font-medium">{liveProvider ? `${liveProvider} — ${liveStage}` : "Waiting for the model"}</p>
+        <p className="text-xs text-muted-foreground mt-1">
+          Live model text — provisional, not yet retained in your tree.
+          {modelResponseComplete ? " Response received; processing and validation continue." : ""}
+        </p>
+        <pre ref={liveTextRef} className="mt-2 whitespace-pre-wrap break-words text-sm max-h-44 overflow-y-auto" data-testid="fresh-tree-live-text">
+          {liveText || "Text will appear here as the provider sends it."}
+        </pre>
       </div>}
       {!running && progress && <p className="text-sm" role="status">{progress}</p>}
       {storageError && <p className="text-amber-900 text-sm" role="alert">{storageError}</p>}

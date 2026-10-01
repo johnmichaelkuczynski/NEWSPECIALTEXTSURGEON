@@ -1,4 +1,5 @@
 import { callLLM } from "../llm";
+import { streamFreshTreeCompletion, streamFreshTreeResearch, type FreshTreeStreamObserver } from "./freshTreeStream";
 
 const PROVIDERS = [
   { name: "OpenAI", id: "openai", key: "OPENAI_API_KEY" },
@@ -10,7 +11,7 @@ const PROVIDERS = [
 ] as const;
 
 type Provider = typeof PROVIDERS[number]["id"];
-type RunState = { unavailable: Set<Provider>; active?: Provider; notify?: (message: string) => void };
+type RunState = { unavailable: Set<Provider>; active?: Provider; notify?: (message: string) => void; stream?: FreshTreeStreamObserver };
 const runs = new WeakMap<AbortSignal, RunState>();
 
 function stateFor(signal: AbortSignal): RunState {
@@ -31,8 +32,9 @@ function failureReason(error: unknown): string {
   return "request failed";
 }
 
-export function reportFreshTreeProviders(signal: AbortSignal, notify: (message: string) => void): void {
+export function reportFreshTreeProviders(signal: AbortSignal, notify: (message: string) => void, stream?: FreshTreeStreamObserver): void {
   stateFor(signal).notify = notify;
+  stateFor(signal).stream = stream;
 }
 
 export function freshTreeProviderUnavailable(signal: AbortSignal, provider: Provider): boolean {
@@ -48,14 +50,18 @@ export function markFreshTreeProviderUnavailable(signal: AbortSignal, provider: 
   state.notify?.(`${name} failed (${failureReason(error)}); trying the next configured API.`);
 }
 
-export async function callFreshTreeLLM(prompt: string, signal: AbortSignal): Promise<string> {
+export async function callFreshTreeLLM(prompt: string, signal: AbortSignal, stage = "Generating or reviewing tree nodes"): Promise<string> {
   const state = stateFor(signal);
   for (const provider of PROVIDERS) {
     if (!process.env[provider.key] || state.unavailable.has(provider.id)) continue;
     if (signal.aborted) throw new Error("Fresh Tree generation cancelled.");
     try {
-      const text = await callLLM(provider.id, prompt, signal);
+      state.stream?.start(provider.name, stage);
+      const text = state.stream
+        ? await streamFreshTreeCompletion(provider.id, prompt, signal, (chunk) => state.stream?.chunk(chunk))
+        : await callLLM(provider.id, prompt, signal);
       if (typeof text !== "string" || !text.trim()) throw new Error("No text returned");
+      state.stream?.complete();
       if (state.unavailable.size && state.active !== provider.id) {
         state.notify?.(`Fresh Tree is now using ${provider.name}.`);
       }
@@ -67,4 +73,12 @@ export async function callFreshTreeLLM(prompt: string, signal: AbortSignal): Pro
     }
   }
   throw new Error("No working Fresh Tree API is available. Check the provider messages above.");
+}
+
+export async function callFreshTreeResearch(prompt: string, signal: AbortSignal): Promise<string> {
+  const observer = stateFor(signal).stream;
+  observer?.start("OpenAI", "Researching supporting facts");
+  const text = await streamFreshTreeResearch(prompt, signal, (chunk) => observer?.chunk(chunk));
+  observer?.complete();
+  return text;
 }
